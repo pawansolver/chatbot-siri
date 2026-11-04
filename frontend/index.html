@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>AETHER AI • World-Class Neural Voice Assistant</title>
+  <meta name="description" content="Next-generation multimodal AI Voice Assistant powered by Google Gemini, Edge Neural TTS, and real-time audio processing." />
+  
+  <!-- Modern Google Fonts: Outfit & Space Grotesk & JetBrains Mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@300;400;500;600;700;800&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <!-- Dynamic Particle & Starfield Background Canvas -->
+  <canvas id="particleCanvas" class="particle-canvas"></canvas>
+
+  <!-- Ambient background glow layers -->
+  <div class="ambient-glow glow-top"></div>
+  <div class="ambient-glow glow-bottom"></div>
+  <div class="ambient-glow glow-center"></div>
+  <div class="ambient-grid"></div>
+
+  <div class="app-container">
+    <!-- Top Navigation Glass Header -->
+    <header class="app-header">
+      <div class="brand">
+        <div class="brand-logo-container">
+          <div class="brand-logo">
+            <span class="logo-ring"></span>
+            <span class="logo-core"></span>
+          </div>
+          <div class="live-pulse-dot" title="Core Online"></div>
+        </div>
+        <div class="brand-text">
+          <div class="brand-title-row">
+            <h1>AETHER</h1>
+            <span class="version-tag">PRO V2.5</span>
+          </div>
+          <span class="brand-sub">NEURAL VOICE CORE • GEMINI INTELLIGENCE</span>
+        </div>
+      </div>
+
+      <div class="header-actions">
+        <!-- Gemini Model Selector -->
+        <div class="control-pill" title="Choose Google Gemini AI Model">
+          <svg class="pill-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 2v20M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/>
+          </svg>
+          <select id="modelSelector" class="glass-select">
+            <option value="gemini-3.6-flash" selected>Gemini 3.6 Flash (Ultra Fast)</option>
+            <option value="gemini-3.7-flash">Gemini 3.7 Flash (Next-Gen)</option>
+            <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
+            <option value="gemini-2.5-pro">Gemini 2.5 Pro (Deep Reasoner)</option>
+          </select>
+        </div>
+
+        <!-- Multilingual Language Selector -->
+        <div class="control-pill" title="Voice & Language Mode">
+          <svg class="pill-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"/>
+            <line x1="2" y1="12" x2="22" y2="12"/>
+            <path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/>
+          </svg>
+          <select id="langSelector" class="glass-select">
+            <option value="auto">🌐 Multilingual (Auto-Detect)</option>
+            <option value="hi">🇮🇳 Hindi (हिन्दी)</option>
+            <option value="en-IN">🇮🇳 Indian English (Hinglish)</option>
+            <option value="en-US">🇺🇸 US English (Ava)</option>
+          </select>
+        </div>
+
+        <!-- Assistant Status Indicator Pill -->
+        <div id="statusPill" class="status-pill checking" title="Gemini AI Cloud Connectivity">
+          <span class="status-dot"></span>
+          <span id="statusText" class="status-label">Checking...</span>
+        </div>
+
+        <!-- Physical Device Hardware Status Pill -->
+        <div id="devicePill" class="status-pill device-ready" title="Hardware Board Status (Raspberry Pi / PC)">
+          <span class="status-dot hardware-dot"></span>
+          <span id="deviceText" class="status-label">Device: READY</span>
+        </div>
+
+        <!-- History Drawer Toggle Button -->
+        <button id="toggleHistoryBtn" class="icon-btn" title="View Conversation Session History" aria-label="Conversation History">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <span id="historyBadge" class="badge">0</span>
+        </button>
+
+        <!-- Clear Chat Session Button -->
+        <button id="clearChatBtn" class="icon-btn" title="Clear Current Session" aria-label="Clear Session">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2M10 11v6M14 11v6" />
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Notification Alert Banner -->
+    <div id="alertBanner" class="alert-banner hidden">
+      <div class="alert-content">
+        <span class="alert-icon">⚡</span>
+        <span id="alertMessage" class="alert-text">Gemini API Key missing.</span>
+      </div>
+      <button id="dismissAlertBtn" class="alert-close" aria-label="Close Alert">&times;</button>
+    </div>
+
+    <!-- Main Central Interactive Stage -->
+    <main class="assistant-stage">
+      
+      <!-- Top State Badge & Latency HUD -->
+      <div class="state-container">
+        <div id="stateBadge" class="state-badge state-idle">
+          <span class="state-pulse-halo"></span>
+          <span class="state-icon-symbol">✦</span>
+          <span id="stateText" class="state-text">STANDBY IDLE</span>
+        </div>
+        <div id="latencyHud" class="latency-hud hidden">
+          <span class="hud-pill" id="hudStt">STT: 0ms</span>
+          <span class="hud-pill" id="hudGemini">AI: 0ms</span>
+          <span class="hud-pill" id="hudTts">TTS: 0ms</span>
+        </div>
+      </div>
+
+      <!-- Hero Animated AI Quantum Orb -->
+      <div class="orb-viewport-wrapper">
+        <div class="orb-viewport">
+          <!-- Orbital Concentric Gyro Rings -->
+          <div class="orbital-ring ring-outer"></div>
+          <div class="orbital-ring ring-middle"></div>
+          <div class="orbital-ring ring-inner"></div>
+
+          <!-- Expanding Audio Wave Halos -->
+          <div class="sound-wave-ring ring-1"></div>
+          <div class="sound-wave-ring ring-2"></div>
+          <div class="sound-wave-ring ring-3"></div>
+
+          <!-- Central Quantum AI Orb -->
+          <div id="aiOrb" class="ai-orb state-idle" role="button" tabindex="0" title="Click or Press Spacebar to speak" aria-label="Aether AI Voice Core">
+            <div class="orb-outer-glow"></div>
+            <div class="orb-chromatic-ring"></div>
+            <div class="orb-ring-swirl"></div>
+            
+            <div class="orb-core">
+              <div class="core-nebula"></div>
+              <div class="core-plasma"></div>
+              <div class="core-vortex"></div>
+              <div class="core-highlight"></div>
+              <div class="core-reflection"></div>
+            </div>
+
+            <!-- 360-degree Live Audio Waveform Canvas -->
+            <canvas id="waveformCanvas" class="waveform-canvas" width="320" height="320"></canvas>
+          </div>
+        </div>
+
+        <!-- Ambient Particle Ring Label -->
+        <div class="orb-caption">
+          <span class="bargein-tip">⚡ Press <b>Spacebar</b> or Click Orb anytime to Interrupt</span>
+        </div>
+      </div>
+
+      <!-- Speech & Conversational Display -->
+      <div class="speech-display-container">
+        
+        <!-- Live User Speech Realtime Transcript -->
+        <div id="liveTranscriptBox" class="live-transcript hidden">
+          <div class="transcript-header">
+            <span class="transcript-tag">
+              <span class="tag-dot"></span> LIVE SPEECH RECOGNITION
+            </span>
+            <span id="detectedLangTag" class="lang-tag">Auto</span>
+          </div>
+          <p id="liveTranscriptText" class="transcript-content">Listening to your microphone...</p>
+        </div>
+
+        <!-- AI Response Glass Card -->
+        <div id="aiResponseCard" class="ai-response-card">
+          <div class="response-header">
+            <div class="ai-author-group">
+              <div class="ai-avatar-mini">
+                <span class="mini-spark"></span>
+              </div>
+              <div class="author-details">
+                <span class="response-author">AETHER ASSISTANT</span>
+                <span id="activeVoiceTag" class="author-meta">Neural Voice • Swara/Ava</span>
+              </div>
+            </div>
+
+            <div class="response-actions">
+              <button id="copyResponseBtn" class="mini-icon-btn" title="Copy response to clipboard">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                  <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>
+                </svg>
+                <span>Copy</span>
+              </button>
+              <button id="replayAudioBtn" class="mini-icon-btn hidden" title="Replay spoken audio">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
+                  <path d="M8 5v14l11-7z"/>
+                </svg>
+                <span>Replay</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="response-body">
+            <p id="aiResponseText" class="response-text">
+              "Welcome! I am Aether, your high-performance AI Voice Assistant. Tap the microphone or speak anytime in English, Hindi, or Hinglish."
+            </p>
+          </div>
+        </div>
+
+        <!-- Interactive Quick Suggestion Prompt Chips -->
+        <div class="prompt-chips-container" id="promptChips">
+          <span class="chips-label">QUICK PROMPTS:</span>
+          <button class="prompt-chip" data-prompt="What can you do as an AI Voice Assistant?">💡 Capabilities</button>
+          <button class="prompt-chip" data-prompt="नमस्ते! आज का दिन कैसा है और आप क्या कर सकते हैं?">🇮🇳 नमस्ते (Hindi)</button>
+          <button class="prompt-chip" data-prompt="Explain how quantum computers work in simple words">🔬 Quantum Tech</button>
+          <button class="prompt-chip" data-prompt="volume up">🔊 Volume Up</button>
+          <button class="prompt-chip" data-prompt="stop">🛑 Stop Audio</button>
+        </div>
+
+      </div>
+
+      <!-- Modern Voice Controls & Glass Input Dock -->
+      <div class="controls-container">
+        
+        <!-- Big Neural Microphone Trigger Button -->
+        <div class="mic-button-wrapper">
+          <div class="mic-glow-halo"></div>
+          <button id="micBtn" class="mic-trigger-btn" title="Tap to Speak (or press Spacebar)" aria-label="Toggle Microphone">
+            <div class="mic-ripple ring-a"></div>
+            <div class="mic-ripple ring-b"></div>
+            
+            <svg class="mic-icon" viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/>
+              <path d="M19 10v2a7 7 0 01-14 0v-2"/>
+              <line x1="12" y1="19" x2="12" y2="23"/>
+              <line x1="8" y1="23" x2="16" y2="23"/>
+            </svg>
+            
+            <span id="micLabel" class="mic-label">TAP TO SPEAK</span>
+          </button>
+        </div>
+
+        <!-- Hybrid Glass Text Input Bar -->
+        <form id="textChatForm" class="text-input-form" onsubmit="return false;">
+          <div class="input-prefix-icon">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>
+            </svg>
+          </div>
+          <input
+            type="text"
+            id="textInput"
+            class="text-input"
+            placeholder="Type a message, prompt, or command (e.g. 'volume up', 'रुको')..."
+            autocomplete="off"
+          />
+          <button type="submit" id="sendTextBtn" class="send-btn" title="Send message" aria-label="Send Message">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="22" y1="2" x2="11" y2="13"/>
+              <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+            </svg>
+          </button>
+        </form>
+      </div>
+
+    </main>
+
+    <!-- Slide-over Conversation History & Telemetry Drawer -->
+    <aside id="historyDrawer" class="history-drawer">
+      <div class="drawer-header">
+        <div class="drawer-title">
+          <div class="drawer-icon-box">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>
+            </svg>
+          </div>
+          <div>
+            <h3>Session Memory</h3>
+            <span class="drawer-subtitle" id="currentSessionLabel">Session: Isolated</span>
+          </div>
+        </div>
+        <button id="closeHistoryBtn" class="drawer-close-btn" aria-label="Close History">&times;</button>
+      </div>
+
+      <div id="historyList" class="history-list">
+        <div class="history-empty">
+          <div class="empty-spark-icon">✨</div>
+          <p>No messages recorded in this session yet.<br>Start speaking or typing to begin.</p>
+        </div>
+      </div>
+
+      <div class="drawer-footer">
+        <button id="drawerClearBtn" class="danger-btn">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/>
+          </svg>
+          Clear Session History
+        </button>
+      </div>
+    </aside>
+
+    <!-- Overlay Backdrop -->
+    <div id="backdropOverlay" class="backdrop-overlay"></div>
+
+    <!-- Hidden Audio Player for Neural TTS playback -->
+    <audio id="ttsAudioPlayer" preload="auto"></audio>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
