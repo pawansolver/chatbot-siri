@@ -1,0 +1,14 @@
+.git
+.venv
+venv
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.env
+backend/temp_audio/*
+!backend/temp_audio/.gitkeep
+backend/data/*.db*
+ESP32_VoiceSpeaker
+*.log
+

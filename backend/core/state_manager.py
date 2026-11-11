@@ -2,7 +2,7 @@ import asyncio
 import logging
 import time
 from enum import Enum
-from typing import Callable, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger("ai_voice_assistant.state")
 
@@ -36,13 +36,22 @@ class StateManager:
     def __init__(self):
         self._state: AssistantState = AssistantState.IDLE
         self._lock = asyncio.Lock()
+        self._session_locks: Dict[str, asyncio.Lock] = {}
+        self._session_states: Dict[str, AssistantState] = {}
+        self._session_tasks: Dict[str, asyncio.Task] = {}
         self._listeners: List[Callable[[AssistantState, dict], None]] = []
         self._last_state_change: float = time.time()
         self._current_task: Optional[asyncio.Task] = None
 
     @property
     def current_state(self) -> AssistantState:
-        """Get the current state."""
+        """Get the current global state."""
+        return self._state
+
+    def get_session_state(self, session_id: Optional[str] = None) -> AssistantState:
+        """Get the current state for a specific session/device, falling back to global state."""
+        if session_id and session_id in self._session_states:
+            return self._session_states[session_id]
         return self._state
 
     @property
@@ -58,9 +67,28 @@ class StateManager:
         """Register a callback for state change events."""
         self._listeners.append(listener)
 
-    def set_state(self, new_state: AssistantState, barge_in: bool = False, metadata: Optional[dict] = None) -> bool:
-        """Set state with validation, allowing SPEAKING -> LISTENING only on barge-in."""
-        meta = metadata or {}
+    def set_state(
+        self,
+        new_state: AssistantState,
+        barge_in: bool = False,
+        metadata: Optional[dict] = None,
+        session_id: Optional[str] = None,
+    ) -> bool:
+        """Set state with validation, updating optional per-session state independently."""
+        meta = dict(metadata or {})
+        if session_id:
+            meta.setdefault("session_id", session_id)
+            prev_session_state = self._session_states.get(session_id, AssistantState.IDLE)
+            if (
+                prev_session_state != new_state
+                and (
+                    (prev_session_state, new_state) in VALID_TRANSITIONS
+                    or new_state in (AssistantState.IDLE, AssistantState.ERROR)
+                    or (barge_in and prev_session_state == AssistantState.SPEAKING and new_state == AssistantState.LISTENING)
+                )
+            ):
+                self._session_states[session_id] = new_state
+
         if self._state == new_state:
             return True
 
@@ -91,24 +119,39 @@ class StateManager:
 
         return True
 
-    def acquire_lock(self):
-        """Async context manager for acquiring processing lock."""
-        return self._lock
+    def acquire_lock(self, session_id: Optional[str] = None) -> asyncio.Lock:
+        """Return per-session/per-device asyncio.Lock so concurrent devices never block each other."""
+        sid = (session_id or "").strip()
+        if not sid:
+            return self._lock
+        if sid not in self._session_locks:
+            self._session_locks[sid] = asyncio.Lock()
+        return self._session_locks[sid]
 
-    def cancel_active_task(self) -> None:
-        """Cancel any running generation or synthesis task immediately (Barge-in / Stop)."""
+    def cancel_active_task(self, session_id: Optional[str] = None) -> None:
+        """Cancel active task for a specific session (or global fallback on barge-in / Stop)."""
+        if session_id:
+            sess_task = self._session_tasks.get(session_id)
+            if sess_task and not sess_task.done():
+                logger.info(f"Canceling active assistant task for session [{session_id}].")
+                sess_task.cancel()
+            self.set_state(AssistantState.IDLE, metadata={"reason": "cancelled"}, session_id=session_id)
+            return
+
         if self._current_task and not self._current_task.done():
             logger.info("Canceling active assistant background task.")
             self._current_task.cancel()
         self.set_state(AssistantState.IDLE, metadata={"reason": "cancelled"})
 
-    def set_active_task(self, task: asyncio.Task) -> None:
-        """Track current running task for cancellation."""
+    def set_active_task(self, task: asyncio.Task, session_id: Optional[str] = None) -> None:
+        """Track current running task per-session and globally for cancellation."""
         self._current_task = task
+        if session_id:
+            self._session_tasks[session_id] = task
 
-    def reset_to_idle(self) -> None:
+    def reset_to_idle(self, session_id: Optional[str] = None) -> None:
         """Force state reset to IDLE."""
-        self.set_state(AssistantState.IDLE)
+        self.set_state(AssistantState.IDLE, session_id=session_id)
 
 
 _state_manager_instance: Optional[StateManager] = None

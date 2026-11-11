@@ -8,6 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
 from backend.config.settings import get_settings
+from backend.ai.mcp_client import get_mcp_skills_client
 from backend.api.routes import router as api_router
 from backend.api.websocket import ws_router
 from backend.middleware.observability import RequestTracingMiddleware
@@ -34,12 +35,20 @@ async def lifespan(app: FastAPI):
     logger.info(f"  🤖 Model: {settings.gemini_model}")
     logger.info(f"  🔑 API Key Configured: {settings.has_api_key}")
     logger.info(f"  🔊 TTS Voice: {settings.tts_voice}")
+    logger.info(f"  🧩 Diffy MCP: enabled={settings.mcp_enabled} mode={settings.mcp_mode} url={settings.mcp_server_url}")
     logger.info(f"  🌐 Host: {settings.host}:{settings.port}")
     logger.info(f"  🛡️ Rate Limit: {settings.rate_limit_per_minute} req/min")
     logger.info("==================================================")
 
     # Ensure audio temp dir exists
     TEMP_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Warm up Diffy MCP skills cache cleanly (non-fatal if Diffy starts later)
+    try:
+        mcp_ready = await get_mcp_skills_client().warm_up()
+        logger.info(f"  🧩 Diffy MCP Cache Warm-up: {'CONNECTED' if mcp_ready else 'STANDBY (will retry dynamically)'}")
+    except Exception as e:
+        logger.warning(f"  ⚠️ Diffy MCP warm-up skipped: {e}")
 
     yield
 

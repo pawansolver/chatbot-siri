@@ -18,13 +18,22 @@ class Settings(BaseSettings):
 
     # Gemini Configuration
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-3.1-flash-lite"
+    gemini_model: str = "gemini-flash-lite-latest"
     available_models: List[str] = [
+        "gemini-flash-lite-latest",
+        "gemini-3.5-flash",
         "gemini-3.1-flash-lite",
         "gemini-3.5-flash-lite",
-        "gemini-3.8-flash",
-        "gemini-flash-latest",
     ]
+
+    # Diffy MCP Backend Configuration
+    mcp_enabled: bool = True
+    mcp_server_url: str = "http://127.0.0.1:3001/mcp"
+    mcp_mode: str = "hybrid"  # hybrid | strict | off
+    mcp_api_key: str = ""
+    mcp_timeout_seconds: float = 8.0
+    mcp_cache_ttl_seconds: float = 600.0
+    mcp_max_tool_turns: int = 4
 
     # Voice & Language Configuration
     language_mode: str = "auto"  # auto | en | hi | hinglish
@@ -37,17 +46,22 @@ class Settings(BaseSettings):
     tts_pitch: str = "+0Hz"
 
     # Server & Network Configuration
-    host: str = "127.0.0.1"
+    host: str = "0.0.0.0"
     port: int = 8000
-    debug: bool = True
-    cors_origins: List[str] = ["http://127.0.0.1:8000", "http://localhost:8000", "http://127.0.0.1:3000"]
+    debug: bool = False  # Disable reload in production — prevents socket drops
+    cors_origins: List[str] = ["*"]  # Allow ESP32 and all LAN clients
+    device_api_key: str = ""  # Optional X-API-Key header required on /api/* when non-empty
+
+    # Session & Long-Term Memory Persistence
+    session_persistence_enabled: bool = True
+    session_db_path: str = str(BASE_DIR / "backend" / "data" / "sessions.db")
 
     # Limits & Protection
-    rate_limit_per_minute: int = 30
+    rate_limit_per_minute: int = 120  # Increased for ESP32 hardware device (was 30)
     max_message_length: int = 1500
     max_audio_size_bytes: int = 10 * 1024 * 1024  # 10MB
     max_history_turns: int = 25
-    request_timeout: float = 20.0
+    request_timeout: float = 60.0  # 60s timeout — Gemini + TTS can take up to 10s
 
     # Assistant Personality (Multilingual Hindi, English, Hinglish)
     system_instruction: str = (
@@ -84,6 +98,16 @@ class Settings(BaseSettings):
             return "auto"
         return v_clean
 
+    @field_validator("mcp_mode")
+    @classmethod
+    def validate_mcp_mode(cls, v: str) -> str:
+        valid_modes = ["hybrid", "strict", "off"]
+        v_clean = v.lower().strip()
+        if v_clean not in valid_modes:
+            logger.warning(f"Invalid MCP mode '{v}'. Falling back to 'hybrid'.")
+            return "hybrid"
+        return v_clean
+
     @property
     def has_api_key(self) -> bool:
         """Check whether a non-empty Gemini API key is configured."""
@@ -99,6 +123,11 @@ class Settings(BaseSettings):
             "active_language_mode": self.language_mode,
             "available_languages": ["auto", "hi", "en-IN", "en-US"],
             "active_voice": self.tts_voice,
+            "mcp_enabled": self.mcp_enabled,
+            "mcp_server_url": self.mcp_server_url,
+            "mcp_mode": self.mcp_mode,
+            "auth_required": bool(self.device_api_key.strip()),
+            "session_persistence_enabled": self.session_persistence_enabled,
             "rate_limit_per_minute": self.rate_limit_per_minute,
             "max_message_length": self.max_message_length,
             "max_history_turns": self.max_history_turns,

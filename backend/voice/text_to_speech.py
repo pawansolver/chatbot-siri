@@ -66,7 +66,7 @@ class TextToSpeechService:
         pitch: Optional[str] = None,
     ) -> Optional[str]:
         """Synthesize text to an MP3 file with language-aware voice selection."""
-        clean_text = text.strip()
+        clean_text = re.sub(r"[*_`#]+", "", text).strip()
         if not clean_text:
             return None
 
@@ -81,6 +81,7 @@ class TextToSpeechService:
         output_path = TEMP_AUDIO_DIR / filename
         wav_path = output_path.with_suffix(".wav")
 
+        t0 = time.time()
         try:
             logger.info(f"Synthesizing ({len(clean_text)} chars) with voice [{voice_to_use}]...")
             communicate = edge_tts.Communicate(
@@ -90,19 +91,43 @@ class TextToSpeechService:
                 pitch=pitch_to_use,
             )
             await communicate.save(str(output_path))
+            logger.info(f"Edge-TTS MP3 done in {(time.time()-t0)*1000:.0f}ms")
 
-            # Automatically convert to 16-bit PCM WAV for ESP32 hardware streaming
+            # Convert MP3 → 16-bit PCM WAV for ESP32 hardware streaming
             try:
                 import miniaudio, wave
+                t1 = time.time()
                 audio_data = miniaudio.mp3_read_file_s16(str(output_path))
                 with wave.open(str(wav_path), "wb") as wav_file:
-                    wav_file.setnchannels(audio_data.nchannels)
-                    wav_file.setsampwidth(2)
-                    wav_file.setframerate(audio_data.sample_rate)
-                    wav_file.writeframes(audio_data.samples.tobytes())
-                logger.info(f"WAV audio generated for hardware: {wav_path.name}")
+                    wav_file.setnchannels(1)          # Mono — ESP32 I2S is mono
+                    wav_file.setsampwidth(2)           # 16-bit PCM
+                    wav_file.setframerate(16000)       # 16kHz — matches ESP32 I2S rate
+                    # Downsample to mono 16kHz if stereo or higher rate
+                    import struct, array
+                    raw = audio_data.samples
+                    src_rate = audio_data.sample_rate
+                    src_ch   = audio_data.nchannels
+                    # Mix to mono if stereo
+                    if src_ch == 2:
+                        raw = array.array('h', [
+                            (raw[i] + raw[i+1]) >> 1
+                            for i in range(0, len(raw), 2)
+                        ])
+                    # Resample: simple linear decimation to 16000 Hz
+                    if src_rate != 16000:
+                        ratio = src_rate / 16000
+                        resampled = array.array('h')
+                        idx = 0.0
+                        while int(idx) < len(raw):
+                            resampled.append(raw[int(idx)])
+                            idx += ratio
+                        raw = resampled
+                    wav_file.writeframes(raw.tobytes())
+                logger.info(f"WAV (16kHz mono) for ESP32 ready in {(time.time()-t1)*1000:.0f}ms: {wav_path.name}")
             except Exception as wav_err:
-                logger.warning(f"Could not create WAV mirror for ESP32: {wav_err}")
+                logger.warning(f"Could not create WAV for ESP32 (miniaudio): {wav_err}")
+                # Fallback: copy mp3 bytes into a fake WAV container won't work,
+                # so just log — ESP32 will not get audio this call but won't crash server.
 
             return filename
         except Exception as e:

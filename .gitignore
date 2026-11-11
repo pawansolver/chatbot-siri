@@ -31,8 +31,9 @@ venv/
 env/
 ENV/
 
-# Temporary audio files
+# Temporary audio files & persistent local DB
 backend/temp_audio/
+backend/data/*.db*
 *.mp3
 *.wav
 *.webm

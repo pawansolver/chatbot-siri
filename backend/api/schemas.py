@@ -60,6 +60,11 @@ class ConfigResponse(BaseModel):
     active_language_mode: str
     available_languages: List[str]
     active_voice: str
+    mcp_enabled: bool = True
+    mcp_server_url: str = "http://127.0.0.1:3001/mcp"
+    mcp_mode: str = "hybrid"
+    auth_required: bool = False
+    session_persistence_enabled: bool = True
     rate_limit_per_minute: int
     max_message_length: int
     max_history_turns: int

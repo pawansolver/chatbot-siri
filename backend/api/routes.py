@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Depends, R
 from fastapi.responses import FileResponse, JSONResponse
 
 from backend.config.settings import Settings, get_settings
+from backend.middleware.auth import verify_device_api_key
 from backend.core.assistant import AssistantCore, get_assistant_core
 from backend.core.state_manager import StateManager, AssistantState, get_state_manager
 from backend.core.session import SessionManager, get_session_manager
@@ -30,6 +31,7 @@ from backend.api.schemas import (
 logger = logging.getLogger("ai_voice_assistant.api")
 
 router = APIRouter(tags=["Assistant API"])
+protected_router = APIRouter(dependencies=[Depends(verify_device_api_key)])
 
 
 # -----------------------------------------------------------------------------
@@ -56,6 +58,8 @@ async def health_readiness(
         details={
             "gemini_connected": status_info.get("gemini", {}).get("status") == "connected",
             "has_api_key": settings.has_api_key,
+            "mcp_connected": status_info.get("mcp", {}).get("connected", False),
+            "mcp_mode": settings.mcp_mode,
             "device_state": device_mgr.current_state.value,
             "stt_engine": settings.stt_engine,
             "tts_voice": settings.tts_voice,
@@ -63,7 +67,7 @@ async def health_readiness(
     )
 
 
-@router.get("/api/device/state", response_model=DeviceStateResponse, tags=["Device Hardware"])
+@protected_router.get("/api/device/state", response_model=DeviceStateResponse, tags=["Device Hardware"])
 async def get_device_state(device_mgr: DeviceStateManager = Depends(get_device_state_manager)):
     """Retrieve physical hardware device status and telemetry."""
     return DeviceStateResponse(
@@ -72,7 +76,7 @@ async def get_device_state(device_mgr: DeviceStateManager = Depends(get_device_s
     )
 
 
-@router.post("/api/device/state", response_model=DeviceStateResponse, tags=["Device Hardware"])
+@protected_router.post("/api/device/state", response_model=DeviceStateResponse, tags=["Device Hardware"])
 async def set_device_state(
     target_state: str,
     device_mgr: DeviceStateManager = Depends(get_device_state_manager),
@@ -92,7 +96,7 @@ async def set_device_state(
 # -----------------------------------------------------------------------------
 # Assistant Core REST Endpoints
 # -----------------------------------------------------------------------------
-@router.get("/api/status")
+@protected_router.get("/api/status")
 async def get_status(
     assistant: AssistantCore = Depends(get_assistant_core),
     device_mgr: DeviceStateManager = Depends(get_device_state_manager),
@@ -103,13 +107,13 @@ async def get_status(
     return status_data
 
 
-@router.get("/api/config", response_model=ConfigResponse)
+@protected_router.get("/api/config", response_model=ConfigResponse)
 async def get_config(settings: Settings = Depends(get_settings)):
     """Return runtime configurable options: models, languages, voices, and STT engines."""
     return ConfigResponse(**settings.get_safe_dict())
 
 
-@router.post("/api/config", response_model=ConfigResponse)
+@protected_router.post("/api/config", response_model=ConfigResponse)
 async def update_config(
     payload: ConfigUpdateRequest,
     settings: Settings = Depends(get_settings),
@@ -130,7 +134,7 @@ async def update_config(
     return ConfigResponse(**settings.get_safe_dict())
 
 
-@router.post("/api/chat", response_model=ChatResponse)
+@protected_router.post("/api/chat", response_model=ChatResponse)
 async def chat_message(
     payload: ChatRequest,
     request: Request,
@@ -155,12 +159,19 @@ async def chat_message(
     return ChatResponse(**result)
 
 
-@router.post("/api/voice/process-audio", response_model=AudioProcessResponse)
+def _sanitize_header_value(text: Optional[str], limit: int = 500) -> str:
+    """Keep HTTP response header strictly single-line ASCII without CR/LF injection."""
+    ascii_only = (text or "").encode("ascii", "ignore").decode("ascii")
+    return " ".join(ascii_only.split())[:limit]
+
+
+@protected_router.post("/api/voice/process-audio", response_model=AudioProcessResponse)
 async def process_audio_file(
     request: Request,
     file: UploadFile = File(...),
     session_id: Optional[str] = Form(default=None),
     assistant: AssistantCore = Depends(get_assistant_core),
+    settings: Settings = Depends(get_settings),
 ):
     """Upload recorded voice audio -> STT -> Command Router -> Gemini AI -> Neural TTS."""
     trace_id = getattr(request.state, "trace_id", "local_req")
@@ -172,9 +183,10 @@ async def process_audio_file(
                 detail="Empty audio file provided.",
             )
 
-        with open(r"C:\ProductSpeaker\backend\temp_audio\last_incoming_audio.wav", "wb") as f_in:
-            f_in.write(audio_bytes)
-
+        if settings.debug:
+            TEMP_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+            with open(TEMP_AUDIO_DIR / "last_incoming_audio.wav", "wb") as f_in:
+                f_in.write(audio_bytes)
 
         filename = file.filename or "audio.wav"
         fmt = "webm" if "webm" in filename.lower() else "wav"
@@ -190,6 +202,21 @@ async def process_audio_file(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=result.get("error", "Failed to process audio"),
             )
+
+        accept_header = request.headers.get("accept", "")
+        if "audio/wav" in accept_header or "audio/*" in accept_header:
+            audio_fn = result.get("audio_filename", "")
+            if audio_fn:
+                wav_fn = audio_fn.replace(".mp3", ".wav")
+                wav_path = TEMP_AUDIO_DIR / wav_fn
+                if wav_path.exists():
+                    headers = {
+                        "X-AI-Response": _sanitize_header_value(result.get("response")),
+                        "X-Prompt": _sanitize_header_value(result.get("prompt")),
+                        "X-Session-ID": _sanitize_header_value(result.get("session_id"), limit=120),
+                    }
+                    return FileResponse(str(wav_path), media_type="audio/wav", headers=headers)
+
         return AudioProcessResponse(**result)
     except HTTPException:
         raise
@@ -201,7 +228,7 @@ async def process_audio_file(
         )
 
 
-@router.post("/api/voice/stt")
+@protected_router.post("/api/voice/stt")
 async def speech_to_text(
     file: UploadFile = File(...),
     language: Optional[str] = Form(default="auto"),
@@ -216,7 +243,7 @@ async def speech_to_text(
     return {"transcript": transcript}
 
 
-@router.post("/api/voice/tts")
+@protected_router.post("/api/voice/tts")
 async def text_to_speech(
     payload: TTSRequest,
     tts_svc: TextToSpeechService = Depends(get_tts_service),
@@ -233,7 +260,7 @@ async def text_to_speech(
     }
 
 
-@router.get("/api/history")
+@protected_router.get("/api/history")
 async def get_history(
     session_id: Optional[str] = None,
     session_mgr: SessionManager = Depends(get_session_manager),
@@ -247,7 +274,7 @@ async def get_history(
     }
 
 
-@router.delete("/api/history")
+@protected_router.delete("/api/history")
 async def clear_history(
     session_id: Optional[str] = None,
     session_mgr: SessionManager = Depends(get_session_manager),
@@ -262,7 +289,7 @@ async def clear_history(
     }
 
 
-@router.post("/api/state/reset")
+@protected_router.post("/api/state/reset")
 async def reset_state(
     payload: ResetStateRequest = ResetStateRequest(),
     state_mgr: StateManager = Depends(get_state_manager),
@@ -270,7 +297,7 @@ async def reset_state(
 ):
     """Reset assistant state or trigger barge-in cancellation for current generation."""
     if payload.barge_in:
-        state_mgr.cancel_active_task()
+        state_mgr.cancel_active_task(session_id=payload.session_id)
         if payload.session_id:
             session = session_mgr.get_session(payload.session_id)
             if session:
@@ -278,13 +305,13 @@ async def reset_state(
     else:
         target = payload.state.upper() if payload.state else "IDLE"
         if target in AssistantState.__members__:
-            state_mgr.set_state(AssistantState[target])
+            state_mgr.set_state(AssistantState[target], session_id=payload.session_id)
         else:
-            state_mgr.reset_to_idle()
-    return {"state": state_mgr.current_state.value}
+            state_mgr.reset_to_idle(session_id=payload.session_id)
+    return {"state": state_mgr.get_session_state(payload.session_id).value}
 
 
-@router.get("/api/audio/{filename}")
+@protected_router.get("/api/audio/{filename}")
 async def get_audio_file(filename: str):
     """Serve synthesized temporary audio file with path sanitization."""
     safe_name = os.path.basename(filename)
@@ -302,3 +329,6 @@ async def get_audio_file(filename: str):
         filename=safe_name,
         headers={"Cache-Control": "no-cache"},
     )
+
+
+router.include_router(protected_router)

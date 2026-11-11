@@ -51,10 +51,21 @@ class AssistantCore:
     async def get_status(self) -> Dict[str, Any]:
         """Return system health, state, and connectivity."""
         gemini_conn = await self.gemini_svc.verify_connection()
+        mcp_status = await self.gemini_svc.mcp_client.get_status()
+        gemini_diag = (
+            self.gemini_svc.get_diagnostics()
+            if hasattr(self.gemini_svc, "get_diagnostics")
+            else {}
+        )
         return {
             "state": self.state_mgr.current_state.value,
             "has_api_key": self.settings.has_api_key,
+            "auth_required": bool((self.settings.device_api_key or "").strip()),
+            "session_persistence_enabled": bool(self.settings.session_persistence_enabled),
+            "active_sessions": len(self.session_mgr._sessions),
             "gemini": gemini_conn,
+            "gemini_diagnostics": gemini_diag,
+            "mcp": mcp_status,
             "model": self.settings.gemini_model,
             "voice": self.settings.tts_voice,
             "stt_engine": self.settings.stt_engine,
@@ -102,9 +113,9 @@ class AssistantCore:
         if cmd_result.is_command:
             logger.info(f"[{trace_id}] Executing local command: {cmd_result.command_name}")
             
-            # If command is Stop / Cancel -> abort active task
+            # If command is Stop / Cancel -> abort active task for this session
             if cmd_result.action in ("STOP_PLAYBACK", "CANCEL"):
-                self.state_mgr.cancel_active_task()
+                self.state_mgr.cancel_active_task(session_id=current_sid)
                 session.cancel_current_generation()
             elif cmd_result.action == "CLEAR_HISTORY":
                 session.conversation.clear()
@@ -138,21 +149,21 @@ class AssistantCore:
         # ---------------------------------------------------------------------
         generation_id = session.new_generation()
 
-        # If assistant was speaking, handle barge-in cancellation of prior task
-        if self.state_mgr.current_state == AssistantState.SPEAKING:
-            self.state_mgr.cancel_active_task()
+        # If assistant was speaking for this session, handle barge-in cancellation
+        if self.state_mgr.get_session_state(current_sid) == AssistantState.SPEAKING:
+            self.state_mgr.cancel_active_task(session_id=current_sid)
 
         gemini_ms = 0.0
         tts_ms = 0.0
 
-        async with self.state_mgr.acquire_lock():
+        async with self.state_mgr.acquire_lock(current_sid):
             current_task = asyncio.current_task()
             if current_task:
-                self.state_mgr.set_active_task(current_task)
+                self.state_mgr.set_active_task(current_task, session_id=current_sid)
 
             try:
                 # State: THINKING
-                self.state_mgr.set_state(AssistantState.THINKING)
+                self.state_mgr.set_state(AssistantState.THINKING, session_id=current_sid)
 
                 # Validate generation has not been superseded
                 if not session.is_current_generation(generation_id):
@@ -170,10 +181,11 @@ class AssistantCore:
                 history_context = session.conversation.get_gemini_context()
                 user_msg = session.conversation.add_user_message(clean_prompt, source=source)
 
-                # Query Gemini AI
+                # Query Gemini AI (with Hybrid Diffy MCP skills support)
                 response_text, gemini_ms = await self.gemini_svc.generate_response(
                     prompt=clean_prompt,
                     history=history_context,
+                    model_override=model_override,
                 )
 
                 # Validate generation has not been superseded during Gemini call
@@ -196,7 +208,7 @@ class AssistantCore:
 
                 # 3. Dynamic Voice Routing & Neural TTS
                 if speak and response_text:
-                    self.state_mgr.set_state(AssistantState.SPEAKING)
+                    self.state_mgr.set_state(AssistantState.SPEAKING, session_id=current_sid)
                     tts_start = time.perf_counter()
 
                     chosen_voice = self.voice_router.route_voice(response_text)
@@ -257,7 +269,7 @@ class AssistantCore:
             except asyncio.CancelledError:
                 logger.info(f"[{trace_id}] Request cancelled due to user barge-in / cancellation.")
                 session.cancel_current_generation()
-                self.state_mgr.reset_to_idle()
+                self.state_mgr.reset_to_idle(session_id=current_sid)
                 return {
                     "success": False,
                     "error": "Request cancelled by user barge-in.",
@@ -268,7 +280,7 @@ class AssistantCore:
                 }
             except Exception as e:
                 logger.error(f"Error in process_text_input: {e}", exc_info=True)
-                self.state_mgr.reset_to_idle()
+                self.state_mgr.reset_to_idle(session_id=current_sid)
                 return {
                     "success": False,
                     "error": f"An error occurred: {str(e)}",
@@ -278,7 +290,7 @@ class AssistantCore:
                     "trace_id": trace_id,
                 }
             finally:
-                self.state_mgr.reset_to_idle()
+                self.state_mgr.reset_to_idle(session_id=current_sid)
 
     async def process_audio_input(
         self,
@@ -308,20 +320,20 @@ class AssistantCore:
         # Start new generation for this voice interaction
         generation_id = session.new_generation()
 
-        if self.state_mgr.current_state == AssistantState.SPEAKING:
-            self.state_mgr.cancel_active_task()
+        if self.state_mgr.get_session_state(current_sid) == AssistantState.SPEAKING:
+            self.state_mgr.cancel_active_task(session_id=current_sid)
 
         transcript = ""
         stt_ms = 0.0
 
-        async with self.state_mgr.acquire_lock():
+        async with self.state_mgr.acquire_lock(current_sid):
             current_task = asyncio.current_task()
             if current_task:
-                self.state_mgr.set_active_task(current_task)
+                self.state_mgr.set_active_task(current_task, session_id=current_sid)
 
             try:
                 # State: LISTENING
-                self.state_mgr.set_state(AssistantState.LISTENING)
+                self.state_mgr.set_state(AssistantState.LISTENING, session_id=current_sid)
                 stt_start = time.perf_counter()
 
                 normalized_bytes, fmt = self.audio_normalizer.normalize_to_wav(audio_bytes)
@@ -364,7 +376,7 @@ class AssistantCore:
             except asyncio.CancelledError:
                 logger.info(f"[{trace_id}] Audio processing cancelled by user barge-in.")
                 session.cancel_current_generation()
-                self.state_mgr.reset_to_idle()
+                self.state_mgr.reset_to_idle(session_id=current_sid)
                 return {
                     "success": False,
                     "error": "Audio processing cancelled.",
@@ -375,7 +387,7 @@ class AssistantCore:
                 }
             except Exception as e:
                 logger.error(f"Error processing audio input: {e}", exc_info=True)
-                self.state_mgr.reset_to_idle()
+                self.state_mgr.reset_to_idle(session_id=current_sid)
                 return {
                     "success": False,
                     "error": str(e),
@@ -385,7 +397,7 @@ class AssistantCore:
                     "trace_id": trace_id,
                 }
             finally:
-                self.state_mgr.reset_to_idle()
+                self.state_mgr.reset_to_idle(session_id=current_sid)
 
         # Route transcript through process_text_input cleanly outside of STT lock
         return await self.process_text_input(
