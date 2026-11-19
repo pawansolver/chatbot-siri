@@ -11,7 +11,7 @@
 // =============================================================================
 static const char* DEFAULT_SSID        = "Arvind";
 static const char* DEFAULT_PASSWORD    = "G7654321";
-static const char* DEFAULT_SERVER_BASE = "http://192.168.31.15:8000";
+static const char* DEFAULT_SERVER_BASE = "http://15.135.138.107:8000";
 static const char* DEFAULT_API_KEY     = "";  // Optional: must match DEVICE_API_KEY in .env if set
 
 // =============================================================================
