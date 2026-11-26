@@ -3,42 +3,49 @@
 #include <HTTPClient.h>
 #include <Preferences.h>
 #include <WebServer.h>
+#include <DNSServer.h>
 #include <ArduinoOTA.h>
 #include "driver/i2s.h"
 
 // =============================================================================
-// DEFAULT FALLBACK CREDENTIALS (Auto-saved/overridable via NVS Web Portal)
+// AETHER AI SMART SPEAKER - PRODUCTION EMBEDDED CLIENT (ESP32 / ESP32-S3)
+// Connected to AWS Cloud Backend: http://15.135.138.107:8000
 // =============================================================================
+
+// Default Fallback Credentials (NVS Flash memory me save hote hain)
 static const char* DEFAULT_SSID        = "Arvind";
 static const char* DEFAULT_PASSWORD    = "G7654321";
 static const char* DEFAULT_SERVER_BASE = "http://15.135.138.107:8000";
-static const char* DEFAULT_API_KEY     = "";  // Optional: must match DEVICE_API_KEY in .env if set
+static const char* DEFAULT_API_KEY     = "";  // Optional
 
 // =============================================================================
-// FIXED HARDWARE PINS (DO NOT CHANGE)
+// FIXED HARDWARE PINS (I2S Audio Pipeline)
 // =============================================================================
-// स्पीकर पिन (I2S_NUM_0)
+// 1. MAX98357A I2S DAC Amplifier (Speaker Out - I2S_NUM_0)
 #define SPK_DIN   7
 #define SPK_BCLK  15
 #define SPK_LRC   16
 
-// माइक पिन (I2S_NUM_1)
+// 2. INMP441 I2S Digital MEMS Mic (Microphone In - I2S_NUM_1)
 #define MIC_SCK   4
 #define MIC_WS    5
 #define MIC_SD    6
 
 // =============================================================================
-// ENTERPRISE VOICE & DYNAMIC VAD SETTINGS
+// ENTERPRISE VOICE & DYNAMIC VAD (Voice Activity Detection)
 // =============================================================================
-#define SAMPLE_RATE         16000
-#define MAX_RECORD_SEC      5       // अधिकतम 5 सेकंड रिकॉर्डिंग (लंबे सवालों के लिए)
-#define MIN_RECORD_MS       700     // कम से कम 0.7 सेकंड रिकॉर्डिंग
-#define EOS_SILENCE_MS      650     // बोलना बंद होने के 650ms बाद तुरंत अपलोड (Dynamic End-of-Speech)
-#define VAD_THRESHOLD       1300    // वेक-स्पीच सेंसिटिविटी
-#define EOS_SILENCE_LEVEL   260     // End-of-speech चंक औसत साइलेंस थ्रेशोल्ड
+#define SAMPLE_RATE         16000   // 16kHz Studio Vocal Standard
+#define MAX_RECORD_SEC      6       // Maximum 6 seconds voice buffer
+#define MIN_RECORD_MS       700     // Minimum 0.7s before silence cutoff
+#define EOS_SILENCE_MS      650     // Bolna band hone ke 650ms baad upload
+#define VAD_THRESHOLD       1300    // Speech Trigger Sensitivity
+#define EOS_SILENCE_LEVEL   260     // End-of-Speech silence floor
 
+// Global Objects
 Preferences prefs;
 WebServer configServer(80);
+DNSServer dnsServer;
+const byte DNS_PORT = 53;
 bool apModeActive = false;
 
 String cfgSsid;
@@ -46,10 +53,11 @@ String cfgPass;
 String cfgServerBase;
 String cfgApiKey;
 String deviceSessionId;
-
 int32_t mic_offset = 0;
 
-// स्टार्टअप चाइम फंक्शन
+// =============================================================================
+// STARTUP AUDIO CHIME (Musical Feedback)
+// =============================================================================
 void playBeep(int freq, int durationMs) {
   int samples = (SAMPLE_RATE * durationMs) / 1000;
   int halfWave = SAMPLE_RATE / freq / 2;
@@ -62,17 +70,19 @@ void playBeep(int freq, int durationMs) {
   }
 }
 
-// I2S स्पीकर सेटअप (FIXED PINS: DIN=7, BCLK=15, LRC=16)
+// =============================================================================
+// I2S HARDWARE INITIALIZATION
+// =============================================================================
 void setupSpeaker() {
   i2s_config_t spk_config = {
     .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
-    .sample_rate = 24000,
+    .sample_rate = 16000,
     .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
     .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
     .communication_format = I2S_COMM_FORMAT_STAND_I2S,
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-    .dma_buf_count = 8,
-    .dma_buf_len = 128,
+    .dma_buf_count = 16,
+    .dma_buf_len = 512,
     .use_apll = false,
     .tx_desc_auto_clear = true
   };
@@ -86,7 +96,6 @@ void setupSpeaker() {
   i2s_set_pin(I2S_NUM_0, &spk_pins);
 }
 
-// I2S माइक सेटअप (FIXED PINS: SCK=4, WS=5, SD=6)
 void setupMicrophone() {
   i2s_config_t mic_config = {
     .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
@@ -109,14 +118,16 @@ void setupMicrophone() {
   i2s_set_pin(I2S_NUM_1, &mic_pins);
 }
 
-// 44-बाइट WAV स्ट्रीम को सीधे I2S स्पीकर पर बजाना (Shared Helper)
+// =============================================================================
+// AUDIO STREAM PLAYBACK HELPER (Anti-Jitter Pre-Buffered I2S Player)
+// =============================================================================
 void playWavStream(WiFiClient* stream, int totalBytes) {
   if (!stream) return;
 
   uint8_t header[44];
   int hRead = 0;
   unsigned long headerWaitStart = millis();
-  while (hRead < 44 && (stream->connected() || stream->available()) && (millis() - headerWaitStart < 5000)) {
+  while (hRead < 44 && (stream->connected() || stream->available()) && (millis() - headerWaitStart < 6000)) {
     if (stream->available()) {
       header[hRead++] = stream->read();
       headerWaitStart = millis();
@@ -135,48 +146,155 @@ void playWavStream(WiFiClient* stream, int totalBytes) {
   if (wavSampleRate < 8000 || wavSampleRate > 48000) wavSampleRate = 16000;
   i2s_set_sample_rates(I2S_NUM_0, wavSampleRate);
 
-  Serial.printf("🔊 Playing on speaker (Rate: %d Hz, Channels: %d, Bytes: %d)...\n", wavSampleRate, channels, totalBytes);
+  int audioBytes = (totalBytes > 44) ? (totalBytes - 44) : 0;
+  Serial.printf("🔊 Audio stream: %d Hz, %d ch, %d bytes total\n", wavSampleRate, channels, totalBytes);
 
-  uint8_t buffer[512];
-  int bytesLeft = (totalBytes > 44) ? (totalBytes - 44) : 9999999;
+  // ---------------------------------------------------------------------------
+  // METHOD 1: FULL RAM PRE-BUFFERING (ELIMINATES 100% NETWORK JITTER & STUTTER)
+  // ---------------------------------------------------------------------------
+  uint8_t* fullBuffer = NULL;
+  if (audioBytes > 0 && audioBytes < 350000) {
+    if (psramFound()) {
+      fullBuffer = (uint8_t*)ps_malloc(audioBytes);
+    }
+    if (!fullBuffer && ESP.getFreeHeap() > (uint32_t)(audioBytes + 45000)) {
+      fullBuffer = (uint8_t*)malloc(audioBytes);
+    }
+  }
+
+  if (fullBuffer) {
+    Serial.printf("📥 Pre-buffering entire audio (%.1f KB) for smooth playback...\n", audioBytes / 1024.0);
+    int totalRead = 0;
+    unsigned long downloadStart = millis();
+    while (totalRead < audioBytes && (stream->connected() || stream->available())) {
+      int avail = stream->available();
+      if (avail > 0) {
+        int toRead = min(avail, audioBytes - totalRead);
+        int r = stream->readBytes((char*)(fullBuffer + totalRead), toRead);
+        if (r <= 0) break;
+        totalRead += r;
+        downloadStart = millis();
+      } else {
+        if (millis() - downloadStart > 8000) break;
+        delay(1);
+      }
+    }
+    Serial.printf("✅ Pre-buffered %d bytes. Playing smoothly through I2S...\n", totalRead);
+
+    const int SAMPLES_PER_CHUNK = 256;
+    if (channels == 1) {
+      int16_t* pcm16 = (int16_t*)fullBuffer;
+      int totalSamples = totalRead / 2;
+      int16_t stereoBuf[SAMPLES_PER_CHUNK * 2];
+
+      for (int i = 0; i < totalSamples; i += SAMPLES_PER_CHUNK) {
+        int chunkSamples = min(SAMPLES_PER_CHUNK, totalSamples - i);
+        for (int s = 0; s < chunkSamples; s++) {
+          int16_t val = pcm16[i + s];
+          // Gentle volume scaling (0.85) to avoid DAC clipping & speaker distortion
+          val = (int16_t)(((int32_t)val * 218) >> 8);
+          stereoBuf[s * 2]     = val;
+          stereoBuf[s * 2 + 1] = val;
+        }
+        size_t bw;
+        i2s_write(I2S_NUM_0, stereoBuf, chunkSamples * 4, &bw, portMAX_DELAY);
+      }
+    } else {
+      size_t bw;
+      i2s_write(I2S_NUM_0, fullBuffer, totalRead, &bw, portMAX_DELAY);
+    }
+
+    free(fullBuffer);
+    Serial.println("✅ AI finished speaking smoothly!");
+    return;
+  }
+
+  // ---------------------------------------------------------------------------
+  // METHOD 2: 16KB JITTER-BUFFERED STREAMING (Fallback if RAM is tight)
+  // ---------------------------------------------------------------------------
+  Serial.println("🔊 Streaming with 16KB Jitter Buffer...");
+  const int PRE_BUFFER_SIZE = 16384;
+  uint8_t* preBuf = (uint8_t*)malloc(PRE_BUFFER_SIZE);
+  int preBufLen = 0;
+  unsigned long pbStart = millis();
+
+  while (preBuf && preBufLen < PRE_BUFFER_SIZE && (stream->connected() || stream->available())) {
+    int avail = stream->available();
+    if (avail > 0) {
+      int toRead = min(avail, PRE_BUFFER_SIZE - preBufLen);
+      int r = stream->readBytes((char*)(preBuf + preBufLen), toRead);
+      if (r <= 0) break;
+      preBufLen += r;
+      pbStart = millis();
+    } else {
+      if (millis() - pbStart > 5000) break;
+      delay(2);
+    }
+  }
+
+  if (preBuf && preBufLen > 0) {
+    if (channels == 1) {
+      int16_t* pcm16 = (int16_t*)preBuf;
+      int samples = preBufLen / 2;
+      int16_t stereo[256 * 2];
+      for (int i = 0; i < samples; i += 256) {
+        int chunk = min(256, samples - i);
+        for (int s = 0; s < chunk; s++) {
+          int16_t val = (int16_t)(((int32_t)pcm16[i + s] * 218) >> 8);
+          stereo[s * 2]     = val;
+          stereo[s * 2 + 1] = val;
+        }
+        size_t bw;
+        i2s_write(I2S_NUM_0, stereo, chunk * 4, &bw, portMAX_DELAY);
+      }
+    } else {
+      size_t bw;
+      i2s_write(I2S_NUM_0, preBuf, preBufLen, &bw, portMAX_DELAY);
+    }
+    free(preBuf);
+  }
+
+  uint8_t streamBuf[1024];
+  int bytesLeft = (totalBytes > 44) ? (totalBytes - 44 - preBufLen) : 9999999;
   unsigned long lastDataMs = millis();
 
   while ((stream->connected() || stream->available()) && bytesLeft > 0) {
     int avail = stream->available();
-    if (avail > 0) {
-      int toRead = avail > (int)sizeof(buffer) ? (int)sizeof(buffer) : avail;
+    if (avail >= 256 || !stream->connected()) {
+      int toRead = min(avail, (int)sizeof(streamBuf));
       if (toRead > bytesLeft) toRead = bytesLeft;
-      int len = stream->readBytes((char*)buffer, toRead);
+      toRead = toRead & ~1;  // Keep 16-bit word alignment
+      if (toRead <= 0) break;
+
+      int len = stream->readBytes((char*)streamBuf, toRead);
       if (len <= 0) break;
       bytesLeft -= len;
       lastDataMs = millis();
 
       if (channels == 1) {
         int samples = len / 2;
-        int16_t* src = (int16_t*)buffer;
-        int16_t stereo[256 * 2];
-        for (int i = 0; i < samples && i < 256; i++) {
-          stereo[i * 2] = src[i];
-          stereo[i * 2 + 1] = src[i];
+        int16_t* src = (int16_t*)streamBuf;
+        int16_t stereo[512 * 2];
+        for (int i = 0; i < samples; i++) {
+          int16_t val = (int16_t)(((int32_t)src[i] * 218) >> 8);
+          stereo[i * 2]     = val;
+          stereo[i * 2 + 1] = val;
         }
         size_t bw;
         i2s_write(I2S_NUM_0, stereo, samples * 4, &bw, portMAX_DELAY);
       } else {
         size_t bw;
-        i2s_write(I2S_NUM_0, buffer, len, &bw, portMAX_DELAY);
+        i2s_write(I2S_NUM_0, streamBuf, len, &bw, portMAX_DELAY);
       }
     } else {
-      if (millis() - lastDataMs > 8000) {
-        Serial.println("⚠️ Audio stream timeout.");
-        break;
-      }
+      if (millis() - lastDataMs > 8000) break;
       delay(2);
     }
   }
   Serial.println("✅ AI finished speaking!");
 }
 
-// JSON fallback केस में URL से WAV डाउनलोड कर बजाना
+// Fallback: Download audio from URL if server responded with JSON
 void playAudioFromURL(String audioUrl) {
   Serial.print("📥 Downloading AI voice response: ");
   Serial.println(audioUrl);
@@ -199,7 +317,7 @@ void playAudioFromURL(String audioUrl) {
 }
 
 // =============================================================================
-// NVS PERSISTENT CONFIG & WEB PORTAL (SoftAP Fallback + LAN Runtime Settings)
+// NVS PERSISTENCE & SMART CAPTIVE WI-FI SETUP PORTAL
 // =============================================================================
 void loadConfig() {
   prefs.begin("aether_cfg", true);
@@ -227,23 +345,58 @@ void saveConfig(const String& ssid, const String& pass, const String& server, co
   prefs.end();
 }
 
+void handleConfigPortal() {
+  // Scan for nearby Wi-Fi networks for auto dropdown
+  int n = WiFi.scanNetworks();
+  String wifiOptions = "";
+  for (int i = 0; i < n; ++i) {
+    String netName = WiFi.SSID(i);
+    if (netName.length() > 0) {
+      wifiOptions += "<option value='" + netName + "'>" + netName + " (" + String(WiFi.RSSI(i)) + " dBm)</option>";
+    }
+  }
+
+  String html = "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
+                "<title>Aether AI Speaker Setup</title>"
+                "<style>"
+                "body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#f8fafc;max-width:440px;margin:20px auto;padding:20px}"
+                ".card{background:#1e293b;border-radius:14px;padding:24px;border:1px solid #334155;box-shadow:0 8px 24px rgba(0,0,0,0.4)}"
+                "h2{margin:0 0 6px;color:#38bdf8;font-size:22px;display:flex;align-items:center;gap:8px}"
+                ".sub{font-size:12px;color:#94a3b8;margin-bottom:18px}"
+                "label{display:block;font-size:12px;font-weight:600;color:#cbd5e1;margin-top:14px;margin-bottom:4px}"
+                "input,select{width:100%;padding:11px;background:#0f172a;color:#fff;border:1px solid #475569;border-radius:8px;box-sizing:border-box;font-size:14px}"
+                "input:focus,select:focus{border-color:#38bdf8;outline:none}"
+                "button{width:100%;padding:13px;background:#0284c7;color:#fff;font-weight:bold;border:0;border-radius:8px;font-size:15px;margin-top:22px;cursor:pointer;transition:background 0.2s}"
+                "button:hover{background:#0369a1}"
+                ".tag{font-size:11px;background:#334155;color:#e2e8f0;padding:3px 8px;border-radius:6px;display:inline-block;margin-bottom:12px}"
+                "</style></head><body>"
+                "<div class='card'>"
+                "<h2>🎙️ Aether Smart Speaker</h2>"
+                "<div class='sub'>Smart Captive Wi-Fi & AI Cloud Configuration</div>"
+                "<div class='tag'>ID: " + deviceSessionId + "</div>"
+                "<form method='POST' action='/save'>"
+                "<label>Select Found Wi-Fi:</label>"
+                "<select onchange='document.getElementById(\"ssidInp\").value=this.value'>"
+                "<option value=''>-- Tap to choose detected network --</option>"
+                + wifiOptions +
+                "</select>"
+                "<label>Wi-Fi Name (SSID):</label>"
+                "<input id='ssidInp' name='ssid' value='" + cfgSsid + "' required placeholder='Enter Wi-Fi network name'>"
+                "<label>Wi-Fi Password:</label>"
+                "<input name='pass' type='password' placeholder='Enter Wi-Fi password'>"
+                "<label>AWS AI Cloud URL:</label>"
+                "<input name='server' value='" + cfgServerBase + "' required placeholder='http://15.135.138.107:8000'>"
+                "<button type='submit'>🚀 Save &amp; Connect</button>"
+                "</form></div></body></html>";
+
+  configServer.send(200, "text/html", html);
+}
+
 void setupConfigWebServer() {
-  configServer.on("/", HTTP_GET, []() {
-    String html = "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
-                  "<title>Aether Speaker Setup</title>"
-                  "<style>body{font-family:sans-serif;max-width:420px;margin:24px auto;padding:16px}"
-                  "input{width:100%;padding:8px;margin:6px 0 14px;box-sizing:border-box}"
-                  "button{padding:10px 18px;background:#111;color:#fff;border:0;border-radius:6px;cursor:pointer}</style></head><body>"
-                  "<h2>Aether AI Speaker Settings</h2>"
-                  "<p><b>Device Session ID:</b> " + deviceSessionId + "</p>"
-                  "<form method='POST' action='/save'>"
-                  "Wi-Fi SSID:<input name='ssid' value='" + cfgSsid + "' required>"
-                  "Wi-Fi Password:<input name='pass' type='password' placeholder='Leave unchanged if empty'>"
-                  "AI Server URL:<input name='server' value='" + cfgServerBase + "' required>"
-                  "Device API Key (Optional):<input name='apikey' value='" + cfgApiKey + "'>"
-                  "<button type='submit'>Save &amp; Reboot</button></form></body></html>";
-    configServer.send(200, "text/html", html);
-  });
+  configServer.on("/", HTTP_GET, handleConfigPortal);
+  configServer.on("/hotspot-detect.html", HTTP_GET, handleConfigPortal); // Apple Captive
+  configServer.on("/generate_204", HTTP_GET, handleConfigPortal);        // Android Captive
+  configServer.on("/ncsi.txt", HTTP_GET, handleConfigPortal);            // Windows Captive
 
   configServer.on("/save", HTTP_POST, []() {
     String newSsid   = configServer.hasArg("ssid") ? configServer.arg("ssid") : cfgSsid;
@@ -255,8 +408,10 @@ void setupConfigWebServer() {
       newServer.remove(newServer.length() - 1);
     }
     saveConfig(newSsid, newPass, newServer, newKey);
-    configServer.send(200, "text/html", "<h3>Saved! Rebooting speaker now...</h3>");
-    delay(800);
+    configServer.send(200, "text/html",
+      "<body style='background:#0f172a;color:#fff;font-family:sans-serif;text-align:center;padding:40px;'>"
+      "<h2>✅ Configuration Saved!</h2><p>Rebooting speaker and connecting to " + newSsid + "...</p></body>");
+    delay(1000);
     ESP.restart();
   });
 
@@ -265,15 +420,25 @@ void setupConfigWebServer() {
 
 void startSoftAPPortal() {
   apModeActive = true;
+  WiFi.disconnect();
+  delay(100);
   WiFi.mode(WIFI_AP);
   WiFi.softAP("AetherSpeaker-Setup");
-  Serial.println("\n⚠️ Wi-Fi failed! SoftAP Config Portal started:");
-  Serial.println("👉 Connect phone/PC to Wi-Fi: AetherSpeaker-Setup");
-  Serial.print("👉 Open browser: http://");
+
+  // DNS Server redirects all requests to captive portal (192.168.4.1)
+  dnsServer.start(DNS_PORT, "*", WiFi.softAPIP());
+
+  Serial.println("\n=======================================================");
+  Serial.println("⚠️ Wi-Fi not found! Smart Captive Portal Started:");
+  Serial.println("👉 1. Connect phone/PC to Wi-Fi: AetherSpeaker-Setup");
+  Serial.print("👉 2. Open browser: http://");
   Serial.println(WiFi.softAPIP());
+  Serial.println("=======================================================\n");
+
   setupConfigWebServer();
 }
 
+// Build standard 44-byte WAV header for recorded microphone audio
 void writeWavHeader(uint8_t* wavHeader, uint32_t wavDataSize) {
   memcpy(wavHeader, "RIFF", 4);
   uint32_t fileSize = 36 + wavDataSize;
@@ -297,13 +462,17 @@ void writeWavHeader(uint8_t* wavHeader, uint32_t wavDataSize) {
   memcpy(wavHeader + 40, &wavDataSize, 4);
 }
 
+// =============================================================================
+// SETUP FUNCTION
+// =============================================================================
 void setup() {
   Serial.begin(115200);
   delay(800);
 
-  Serial.println("\n==========================================");
-  Serial.println("🤖 ENTERPRISE AI VOICE ASSISTANT - BOOTING");
-  Serial.println("==========================================");
+  Serial.println("\n========================================================");
+  Serial.println("🤖 AETHER PHYSICAL AI SMART SPEAKER - BOOTING");
+  Serial.println("   AWS Cloud Target: http://15.135.138.107:8000");
+  Serial.println("========================================================");
 
   setupSpeaker();
   setupMicrophone();
@@ -311,36 +480,37 @@ void setup() {
   WiFi.mode(WIFI_STA);
   loadConfig();
 
-  Serial.print("Connecting to Wi-Fi: ");
+  Serial.print("📡 Connecting to Wi-Fi: ");
   Serial.println(cfgSsid);
-  WiFi.setSleep(false);        // Wi-Fi स्लीप बंद (रॉक-सॉलिड कनेक्शन)
-  WiFi.setAutoReconnect(true); // बैकग्राउंड में ऑटो री-कनेक्ट चालू
+  WiFi.setSleep(false);        // Prevent Wi-Fi sleep (Rock solid connection)
+  WiFi.setAutoReconnect(true); // Auto reconnect in background
   WiFi.begin(cfgSsid.c_str(), cfgPass.c_str());
 
   unsigned long connectStart = millis();
-  while (WiFi.status() != WL_CONNECTED && (millis() - connectStart < 15000)) {
+  while (WiFi.status() != WL_CONNECTED && (millis() - connectStart < 14000)) {
     delay(300);
     Serial.print(".");
   }
 
+  // Fallback to Smart Hotspot Portal if Wi-Fi fails
   if (WiFi.status() != WL_CONNECTED) {
     startSoftAPPortal();
     return;
   }
 
-  Serial.println("\n🎉 Wi-Fi Connected!");
-  Serial.print("📡 Speaker IP: ");
+  Serial.println("\n🎉 Wi-Fi Connected Successfully!");
+  Serial.print("📡 Speaker IP on LAN: ");
   Serial.println(WiFi.localIP());
   Serial.print("🆔 Device Session ID: ");
   Serial.println(deviceSessionId);
 
-  // Over-The-Air (OTA) Firmware Update + LAN Settings Portal
-  ArduinoOTA.setHostname("aether-voice-speaker");
+  // OTA firmware update & LAN runtime config portal
+  ArduinoOTA.setHostname("aether-smart-speaker");
   ArduinoOTA.begin();
   setupConfigWebServer();
-  Serial.println("🔄 ArduinoOTA & Config UI ready at http://" + WiFi.localIP().toString());
+  Serial.println("🔄 Config UI ready at http://" + WiFi.localIP().toString());
 
-  // AI सर्वर पिंग करना
+  // Ping AWS Cloud Backend Health
   HTTPClient http;
   String checkUrl = cfgServerBase + "/health/live";
   http.begin(checkUrl);
@@ -348,24 +518,29 @@ void setup() {
   http.addHeader("Connection", "close");
   int code = http.GET();
   if (code == 200) {
-    Serial.println("🧠 Connected to AI Backend successfully!");
-    playBeep(523, 120);
+    Serial.println("🧠 Connected to AWS AI Cloud Backend successfully!");
+    playBeep(523, 120); // High pitch startup chime
     playBeep(659, 160);
   } else {
-    Serial.printf("⚠️ Server health check failed (%d), check IP: %s\n", code, cfgServerBase.c_str());
+    Serial.printf("⚠️ Server health check status: %d (Check server base: %s)\n", code, cfgServerBase.c_str());
   }
   http.end();
 
-  Serial.println("\n🎙️ READY! Speak into the mic to talk with AI...\n");
+  Serial.println("\n🎙️ READY! Speak into microphone to chat with AI...\n");
 }
 
+// =============================================================================
+// MAIN LOOP FUNCTION
+// =============================================================================
 void loop() {
-  configServer.handleClient();
   if (apModeActive) {
+    dnsServer.processNextRequest();
+    configServer.handleClient();
     delay(10);
     return;
   }
 
+  configServer.handleClient();
   ArduinoOTA.handle();
 
   if (WiFi.status() != WL_CONNECTED) {
@@ -382,9 +557,9 @@ void loop() {
     mic_offset = (mic_offset * 31 + raw) / 32;
     int16_t sound = abs(raw - mic_offset);
 
-    // अगर यूज़र ने बोलना शुरू किया
+    // When user speaks
     if (sound > VAD_THRESHOLD) {
-      Serial.println("\n🗣️ Speech Detected! Listening (Dynamic VAD up to 5s)...");
+      Serial.println("\n🗣️ Speech Detected! Listening (Dynamic VAD up to 6s)...");
 
       String boundary = "----ESP32_AI_Boundary";
       String sessionPart =
@@ -413,7 +588,7 @@ void loop() {
         payload = (uint8_t*)malloc(maxPayloadLen);
       }
       if (!payload) {
-        // Fallback to 4s buffer if heap without PSRAM is tight
+        // Fallback to 4s buffer if heap is constrained
         maxSamples = SAMPLE_RATE * 4;
         maxWavDataSize = maxSamples * 2;
         maxPayloadLen = headLen + 44 + maxWavDataSize + tailLen;
@@ -421,15 +596,13 @@ void loop() {
       }
 
       if (!payload) {
-        Serial.println("❌ Out of memory!");
+        Serial.println("❌ Out of memory buffer!");
         delay(500);
         return;
       }
 
-      // मल्टीपार्ट हेडर कॉपी करना
       memcpy(payload, head.c_str(), headLen);
 
-      // माइक से 256 सैंपल्स के चंक में साफ़ रिकॉर्डिंग + Dynamic End-of-Speech VAD
       uint8_t* wavHeader = payload + headLen;
       int16_t* pcmDest = (int16_t*)(payload + headLen + 44);
       const int CHUNK = 256;
@@ -479,8 +652,7 @@ void loop() {
       memcpy(payload + headLen + 44 + actualWavDataSize, tail.c_str(), tailLen);
       int actualPayloadLen = headLen + 44 + (int)actualWavDataSize + tailLen;
 
-      Serial.printf("📤 Sending %.1f KB WAV (Session: %s)...\n",
-                    actualPayloadLen / 1024.0, deviceSessionId.c_str());
+      Serial.printf("📤 Sending %.1f KB audio WAV to AWS Cloud...\n", actualPayloadLen / 1024.0);
 
       HTTPClient http;
       String uploadUrl = cfgServerBase + "/api/voice/process-audio";
@@ -532,13 +704,13 @@ void loop() {
           }
         }
       } else {
-        Serial.printf("❌ Server error: %d\n", resCode);
+        Serial.printf("❌ AWS Cloud Server error: %d\n", resCode);
         http.end();
       }
 
-      // स्पीकर का इको साफ़ करने के लिए बफ़र क्लियर और छोटा पॉज़
+      // Clear audio DMA buffer to prevent echo loopback
       i2s_zero_dma_buffer(I2S_NUM_1);
-      delay(900);
+      delay(800);
 
       Serial.println("\n🎙️ Listening again...\n");
     }

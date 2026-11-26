@@ -21,8 +21,8 @@ class BaseMemoryStore(ABC):
         pass
 
     @abstractmethod
-    async def store_fact(self, key: str, value: Any, user_id: Optional[str] = None) -> bool:
-        """Save a long-term user fact or preference."""
+    async def store_fact(self, key: str, value: Any, user_id: Optional[str] = None, consent: bool = False) -> bool:
+        """Save a long-term user fact or preference (requires consent for default_user)."""
         pass
 
     @abstractmethod
@@ -38,13 +38,29 @@ class InMemoryStore(BaseMemoryStore):
         self._user_facts: Dict[str, Dict[str, Any]] = {}
 
     async def retrieve_context(self, query: str, user_id: Optional[str] = None, limit: int = 3) -> List[str]:
-        uid = user_id or "default_user"
+        if not user_id or user_id == "default_user":
+            # Safety & Privacy: Do not share unpartitioned facts across household members
+            return []
+        uid = user_id
         facts = self._user_facts.get(uid, {})
         snippets = [f"{k}: {v}" for k, v in facts.items()]
         return snippets[:limit]
 
-    async def store_fact(self, key: str, value: Any, user_id: Optional[str] = None) -> bool:
-        uid = user_id or "default_user"
+    async def store_fact(self, key: str, value: Any, user_id: Optional[str] = None, consent: bool = False) -> bool:
+        if not user_id or user_id == "default_user":
+            if not consent:
+                logger.warning("Refused storing unauthenticated fact for default_user without explicit consent.")
+                return False
+            uid = "default_user"
+        else:
+            uid = user_id
+
+        # Sensitive disclosure filter: do not persist health/trauma/marital conflict
+        text_check = f"{key} {value}".lower()
+        if any(w in text_check for w in ("depress", "suicid", "abuse", "medic", "mental", "violenc", "assault")):
+            logger.warning(f"Refused persisting sensitive disclosure in long-term fact memory: {key}")
+            return False
+
         if uid not in self._user_facts:
             self._user_facts[uid] = {}
         self._user_facts[uid][key] = value
@@ -121,7 +137,10 @@ class SQLiteMemoryStore(BaseMemoryStore):
             self._conn.close()
 
     async def retrieve_context(self, query: str, user_id: Optional[str] = None, limit: int = 3) -> List[str]:
-        uid = user_id or "default_user"
+        if not user_id or user_id == "default_user":
+            # Safety & Privacy: Do not share unpartitioned facts across household members
+            return []
+        uid = user_id
         with self._lock:
             rows = self._conn.execute(
                 "SELECT fact_key, fact_value FROM user_facts WHERE user_id = ? ORDER BY updated_at DESC LIMIT ?",
@@ -136,8 +155,21 @@ class SQLiteMemoryStore(BaseMemoryStore):
             snippets.append(f"{row['fact_key']}: {val}")
         return snippets
 
-    async def store_fact(self, key: str, value: Any, user_id: Optional[str] = None) -> bool:
-        uid = user_id or "default_user"
+    async def store_fact(self, key: str, value: Any, user_id: Optional[str] = None, consent: bool = False) -> bool:
+        if not user_id or user_id == "default_user":
+            if not consent:
+                logger.warning("Refused storing unauthenticated fact for default_user without explicit consent.")
+                return False
+            uid = "default_user"
+        else:
+            uid = user_id
+
+        # Sensitive disclosure filter: do not persist health/trauma/marital conflict
+        text_check = f"{key} {value}".lower()
+        if any(w in text_check for w in ("depress", "suicid", "abuse", "medic", "mental", "violenc", "assault")):
+            logger.warning(f"Refused persisting sensitive disclosure in long-term fact memory: {key}")
+            return False
+
         serialized = json.dumps(value, ensure_ascii=False)
         with self._lock:
             self._conn.execute(

@@ -8,6 +8,7 @@ from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
 from google.genai import types
 
+from backend.ai.mcp_bridge import FastMCPBridge, _local_safety_fallback_screen
 from backend.config.settings import Settings, get_settings
 
 logger = logging.getLogger("ai_voice_assistant.mcp")
@@ -171,6 +172,37 @@ class MCPSkillsClient:
         self._tool_result_cache: Dict[Tuple[str, str], Tuple[float, str]] = {}
         self._cache_hits: int = 0
         self._cache_misses: int = 0
+        self._bridge: Optional[FastMCPBridge] = None
+
+    def get_bridge(self) -> FastMCPBridge:
+        """Get or initialize persistent shared FastMCPBridge."""
+        if self._bridge is None:
+            self._bridge = FastMCPBridge(
+                base_url=self.settings.mcp_server_url,
+                api_key=self.settings.mcp_api_key,
+                timeout=float(self.settings.mcp_timeout_seconds),
+            )
+        return self._bridge
+
+    async def understand_human_problem(
+        self,
+        user_input: str,
+        conversation_history: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """Pre-generation problem understanding through FastMCP or emergency safety fallback."""
+        if not self.is_active:
+            return _local_safety_fallback_screen(user_input)
+        bridge = self.get_bridge()
+        return await bridge.understand_human_problem(user_input, conversation_history)
+
+    async def route_skills(
+        self,
+        analysis: Dict[str, Any],
+        query_hint: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Route skills dynamically based on problem analysis."""
+        bridge = self.get_bridge()
+        return await bridge.route_skills(analysis, query_hint)
 
     @property
     def is_active(self) -> bool:
@@ -407,13 +439,41 @@ class MCPSkillsClient:
             return [r or "" for r in results]
 
         try:
-            async with self._build_client(self.settings.mcp_timeout_seconds) as client:
+            if self._client_factory is not None:
+                async with self._build_client(self.settings.mcp_timeout_seconds) as client:
+                    for idx in uncached_indices:
+                        name, args = tool_calls[idx]
+                        normalized_args = args or {}
+                        try:
+                            res = await client.call_tool(name, normalized_args)
+                            raw_text = _extract_tool_text(res)
+                            if name == "list_skills":
+                                parsed = _parse_skills_catalog(raw_text)
+                                if parsed:
+                                    self._cached_skills = parsed
+                                    self._cached_raw_skills_text = raw_text
+                                    self._last_success_ts = time.monotonic()
+                            if self._is_cacheable_result(name, raw_text):
+                                cache_key = (
+                                    name,
+                                    json.dumps(normalized_args, sort_keys=True, ensure_ascii=False),
+                                )
+                                self._tool_result_cache[cache_key] = (time.monotonic(), raw_text)
+                            normalized = self._normalize_tool_output(name, raw_text)
+                            results[idx] = _compact_markdown_for_voice(normalized, query_hint=query_hint)
+                        except Exception as tool_err:
+                            logger.warning(f"Diffy MCP tool '{name}' failed: {tool_err}")
+                            results[idx] = f"TOOL_ERROR ({name}): {tool_err}"
+                    self._last_error = None
+                    return [r or "" for r in results]
+            else:
+                bridge = self.get_bridge()
                 for idx in uncached_indices:
                     name, args = tool_calls[idx]
                     normalized_args = args or {}
                     try:
-                        res = await client.call_tool(name, normalized_args)
-                        raw_text = _extract_tool_text(res)
+                        res = await bridge.call_tool(name, normalized_args)
+                        raw_text = res if isinstance(res, str) else json.dumps(res, ensure_ascii=False)
                         if name == "list_skills":
                             parsed = _parse_skills_catalog(raw_text)
                             if parsed:

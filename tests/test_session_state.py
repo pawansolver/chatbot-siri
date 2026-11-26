@@ -5,7 +5,7 @@ from backend.core.state_manager import StateManager, AssistantState
 
 def test_session_manager_isolation():
     """Verify separate sessions have completely isolated conversation histories."""
-    mgr = SessionManager()
+    mgr = SessionManager(enable_persistence=False)
 
     # Create Session 1
     s1 = mgr.get_or_create_session("session_alice")
