@@ -8,6 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
 from backend.config.settings import get_settings
+from backend.ai.agent_client import get_agent_gateway_client
 from backend.ai.mcp_client import get_mcp_skills_client
 from backend.api.routes import router as api_router
 from backend.api.websocket import ws_router
@@ -43,12 +44,19 @@ async def lifespan(app: FastAPI):
     # Ensure audio temp dir exists
     TEMP_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Warm up Diffy MCP skills cache cleanly (non-fatal if Diffy starts later)
-    try:
-        mcp_ready = await get_mcp_skills_client().warm_up()
-        logger.info(f"  🧩 Diffy MCP Cache Warm-up: {'CONNECTED' if mcp_ready else 'STANDBY (will retry dynamically)'}")
-    except Exception as e:
-        logger.warning(f"  ⚠️ Diffy MCP warm-up skipped: {e}")
+    # Verify Diffy Agent API (Single Brain) connectivity cleanly
+    if settings.use_agent_gateway:
+        try:
+            agent_status = await get_agent_gateway_client().verify_connection()
+            logger.info(f"  🧠 Diffy Agent API: {agent_status.get('status')} ({settings.diffy_agent_api_url})")
+        except Exception as e:
+            logger.warning(f"  ⚠️ Diffy Agent API check skipped: {e}")
+    else:
+        try:
+            mcp_ready = await get_mcp_skills_client().warm_up()
+            logger.info(f"  🧩 Diffy MCP Cache Warm-up: {'CONNECTED' if mcp_ready else 'STANDBY (will retry dynamically)'}")
+        except Exception as e:
+            logger.warning(f"  ⚠️ Diffy MCP warm-up skipped: {e}")
 
     yield
 

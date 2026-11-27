@@ -8,6 +8,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Depends, Request, status
 from fastapi.responses import FileResponse, JSONResponse
 
+from backend.ai.agent_client import get_agent_gateway_client
 from backend.config.settings import Settings, get_settings
 from backend.middleware.auth import verify_device_api_key
 from backend.core.assistant import AssistantCore, get_assistant_core
@@ -26,6 +27,8 @@ from backend.api.schemas import (
     ResetStateRequest,
     HealthResponse,
     DeviceStateResponse,
+    DevicePairRequest,
+    DevicePairResponse,
 )
 
 logger = logging.getLogger("ai_voice_assistant.api")
@@ -56,8 +59,10 @@ async def health_readiness(
         status="ready" if is_ready else "degraded",
         ready=is_ready,
         details={
+            "mode": status_info.get("mode", "legacy"),
+            "agent_api_connected": status_info.get("agent_api", {}).get("status") == "connected",
             "gemini_connected": status_info.get("gemini", {}).get("status") == "connected",
-            "has_api_key": settings.has_api_key,
+            "has_api_key": status_info.get("has_api_key", settings.has_api_key),
             "mcp_connected": status_info.get("mcp", {}).get("connected", False),
             "mcp_mode": settings.mcp_mode,
             "device_state": device_mgr.current_state.value,
@@ -134,14 +139,29 @@ async def update_config(
     return ConfigResponse(**settings.get_safe_dict())
 
 
+@protected_router.post("/api/device/pair", response_model=DevicePairResponse, tags=["Device Hardware"])
+async def pair_device(payload: DevicePairRequest):
+    """Pair an ESP32 speaker device with a canonical Open WebUI user_id and issue a per-device token."""
+    try:
+        res = await get_agent_gateway_client().pair_device(
+            device_id=payload.device_id,
+            user_id=payload.user_id,
+            device_name=payload.device_name,
+        )
+        return DevicePairResponse(**res)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to pair device with Diffy Agent API: {e}")
+
+
 @protected_router.post("/api/chat", response_model=ChatResponse)
 async def chat_message(
     payload: ChatRequest,
     request: Request,
     assistant: AssistantCore = Depends(get_assistant_core),
 ):
-    """Send text prompt -> Command Router -> Gemini AI -> Neural TTS with Generation ID."""
+    """Send text prompt -> Command Router -> Diffy Agent API -> Neural TTS with Generation ID."""
     trace_id = getattr(request.state, "trace_id", "local_req")
+    device_token = getattr(request.state, "device_token", None) or request.headers.get("x-device-token")
     result = await assistant.process_text_input(
         prompt=payload.message,
         speak=payload.speak,
@@ -149,6 +169,7 @@ async def chat_message(
         session_id=payload.session_id,
         model_override=payload.model,
         language_override=payload.language,
+        device_token=device_token,
         trace_id=trace_id,
     )
     if not result.get("success"):
@@ -191,10 +212,12 @@ async def process_audio_file(
         filename = file.filename or "audio.wav"
         fmt = "webm" if "webm" in filename.lower() else "wav"
 
+        device_token = getattr(request.state, "device_token", None) or request.headers.get("x-device-token")
         result = await assistant.process_audio_input(
             audio_bytes=audio_bytes,
             audio_format=fmt,
             session_id=session_id,
+            device_token=device_token,
             trace_id=trace_id,
         )
         if not result.get("success"):

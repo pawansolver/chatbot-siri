@@ -97,6 +97,12 @@ get_device_state_manager().register_listener(on_device_state_change)
 @ws_router.websocket("/api/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint for bi-directional real-time voice, streaming, and generation cancellation."""
+    ws_device_token = (
+        websocket.query_params.get("device_token")
+        or websocket.headers.get("x-device-token")
+        or ""
+    ).strip() or None
+
     await ws_manager.connect(websocket)
     state_mgr = get_state_manager()
     device_mgr = get_device_state_manager()
@@ -167,20 +173,36 @@ async def websocket_endpoint(websocket: WebSocket):
                     state_mgr.set_state(AssistantState.THINKING)
                     history_ctx = session.conversation.get_gemini_context()
                     session.conversation.add_user_message(prompt, source="text")
+                    msg_device_token = (msg.get("device_token") or ws_device_token or "").strip() or None
 
                     full_reply = []
-                    async for chunk in assistant.gemini_svc.generate_response_stream(prompt, history=history_ctx):
-                        # Verify generation has not been cancelled mid-stream
-                        if not session.is_current_generation(current_gen_id):
-                            logger.info(f"WS stream aborted mid-chunk for stale generation {current_gen_id}")
-                            break
+                    if assistant.settings.use_agent_gateway or assistant.gemini_svc is None:
+                        gateway_reply, _ = await assistant.agent_client.chat_completion(
+                            prompt=prompt,
+                            session_id=session.session_id,
+                            device_token=msg_device_token,
+                            model_override=msg.get("model"),
+                        )
+                        if session.is_current_generation(current_gen_id) and gateway_reply:
+                            full_reply.append(gateway_reply)
+                            await websocket.send_text(json.dumps({
+                                "type": "stream_chunk",
+                                "data": {"chunk": gateway_reply},
+                                "generation_id": current_gen_id,
+                            }))
+                    else:
+                        async for chunk in assistant.gemini_svc.generate_response_stream(prompt, history=history_ctx):
+                            # Verify generation has not been cancelled mid-stream
+                            if not session.is_current_generation(current_gen_id):
+                                logger.info(f"WS stream aborted mid-chunk for stale generation {current_gen_id}")
+                                break
 
-                        full_reply.append(chunk)
-                        await websocket.send_text(json.dumps({
-                            "type": "stream_chunk",
-                            "data": {"chunk": chunk},
-                            "generation_id": current_gen_id,
-                        }))
+                            full_reply.append(chunk)
+                            await websocket.send_text(json.dumps({
+                                "type": "stream_chunk",
+                                "data": {"chunk": chunk},
+                                "generation_id": current_gen_id,
+                            }))
 
                     if session.is_current_generation(current_gen_id):
                         final_text = "".join(full_reply).strip()

@@ -16,21 +16,24 @@ ENV_FILE = BASE_DIR / ".env"
 class Settings(BaseSettings):
     """Centralized application settings with startup validation and safe exposure."""
 
-    # Gemini Configuration
+    # Diffy Agent API Gateway Configuration (Single Brain)
+    diffy_agent_api_url: str = "http://127.0.0.1:3001"
+    device_token: str = ""  # Per-device paired token (fluai_dev_...) issued by /v1/devices/pair
+    use_agent_gateway: bool = True
+
+    # Legacy Gemini Configuration (kept optional only for legacy unit test compatibility)
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-flash-lite-latest"
+    gemini_model: str = "diffy-agent"
     available_models: List[str] = [
+        "diffy-agent",
         "gemini-flash-lite-latest",
-        "gemini-3.5-flash",
-        "gemini-3.1-flash-lite",
-        "gemini-3.5-flash-lite",
         "gemini-2.5-flash",
     ]
 
-    # Diffy MCP Backend Configuration
+    # Legacy MCP settings (unused in Device Gateway mode)
     mcp_enabled: bool = True
     mcp_server_url: str = "http://127.0.0.1:3001/mcp"
-    mcp_mode: str = "hybrid"  # hybrid | strict | off
+    mcp_mode: str = "hybrid"
     mcp_api_key: str = ""
     mcp_timeout_seconds: float = 8.0
     mcp_cache_ttl_seconds: float = 600.0
@@ -53,8 +56,8 @@ class Settings(BaseSettings):
     cors_origins: List[str] = ["*"]  # Allow ESP32 and all LAN clients
     device_api_key: str = ""  # Optional X-API-Key header required on /api/* when non-empty
 
-    # Session & Long-Term Memory Persistence
-    session_persistence_enabled: bool = True
+    # Short-lived Device State Only (Long-term memory moved to Diffy Agent API Neon Postgres)
+    session_persistence_enabled: bool = False
     session_db_path: str = str(BASE_DIR / "backend" / "data" / "sessions.db")
 
     # Limits & Protection

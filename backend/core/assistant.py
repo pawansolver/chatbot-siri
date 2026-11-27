@@ -8,6 +8,7 @@ from backend.core.state_manager import StateManager, AssistantState, get_state_m
 from backend.core.session import SessionManager, get_session_manager
 from backend.core.memory import BaseMemoryStore, get_memory_store
 from backend.core.command_router import CommandRouter, get_command_router
+from backend.ai.agent_client import AgentGatewayClient, get_agent_gateway_client
 from backend.ai.gemini_service import GeminiService, get_gemini_service
 from backend.voice.speech_to_text import BaseSTTService, get_stt_service
 from backend.voice.text_to_speech import TextToSpeechService, get_tts_service
@@ -30,6 +31,7 @@ class AssistantCore:
         command_router: Optional[CommandRouter] = None,
         memory_store: Optional[BaseMemoryStore] = None,
         gemini_svc: Optional[GeminiService] = None,
+        agent_client: Optional[AgentGatewayClient] = None,
         stt_svc: Optional[BaseSTTService] = None,
         tts_svc: Optional[TextToSpeechService] = None,
         lang_detector: Optional[LanguageDetector] = None,
@@ -41,7 +43,8 @@ class AssistantCore:
         self.session_mgr = session_mgr or get_session_manager()
         self.command_router = command_router or get_command_router()
         self.memory_store = memory_store or get_memory_store()
-        self.gemini_svc = gemini_svc or get_gemini_service()
+        self.agent_client = agent_client or get_agent_gateway_client()
+        self.gemini_svc = gemini_svc if gemini_svc is not None else (None if self.settings.use_agent_gateway else get_gemini_service())
         self.stt_svc = stt_svc or get_stt_service()
         self.tts_svc = tts_svc or get_tts_service()
         self.lang_detector = lang_detector or get_language_detector()
@@ -50,6 +53,22 @@ class AssistantCore:
 
     async def get_status(self) -> Dict[str, Any]:
         """Return system health, state, and connectivity."""
+        if self.settings.use_agent_gateway:
+            agent_conn = await self.agent_client.verify_connection()
+            return {
+                "mode": "device_gateway",
+                "state": self.state_mgr.current_state.value,
+                "has_api_key": bool((self.settings.device_token or "").strip()),
+                "auth_required": bool((self.settings.device_api_key or "").strip()),
+                "session_persistence_enabled": bool(self.settings.session_persistence_enabled),
+                "active_sessions": len(self.session_mgr._sessions),
+                "agent_api": agent_conn,
+                "model": "diffy-agent",
+                "voice": self.settings.tts_voice,
+                "stt_engine": self.settings.stt_engine,
+                "language_mode": self.settings.language_mode,
+            }
+
         gemini_conn = await self.gemini_svc.verify_connection()
         mcp_status = await self.gemini_svc.mcp_client.get_status()
         gemini_diag = (
@@ -58,6 +77,7 @@ class AssistantCore:
             else {}
         )
         return {
+            "mode": "legacy",
             "state": self.state_mgr.current_state.value,
             "has_api_key": self.settings.has_api_key,
             "auth_required": bool((self.settings.device_api_key or "").strip()),
@@ -80,6 +100,7 @@ class AssistantCore:
         session_id: Optional[str] = None,
         model_override: Optional[str] = None,
         language_override: Optional[str] = None,
+        device_token: Optional[str] = None,
         trace_id: str = "local_trace",
     ) -> Dict[str, Any]:
         """Process text prompt through Command Router -> Gemini AI -> Neural TTS with Generation ID validation."""
@@ -181,12 +202,22 @@ class AssistantCore:
                 history_context = session.conversation.get_gemini_context()
                 user_msg = session.conversation.add_user_message(clean_prompt, source=source)
 
-                # Query Gemini AI (with Hybrid Diffy MCP skills support)
-                response_text, gemini_ms = await self.gemini_svc.generate_response(
-                    prompt=clean_prompt,
-                    history=history_context,
-                    model_override=model_override,
-                )
+                # Forward to Diffy Agent API (Single Brain) in Device Gateway mode, or legacy Gemini
+                if self.settings.use_agent_gateway:
+                    response_text, gemini_ms = await self.agent_client.chat_completion(
+                        prompt=clean_prompt,
+                        session_id=current_sid,
+                        device_token=device_token,
+                        model_override=model_override,
+                    )
+                else:
+                    if self.gemini_svc is None:
+                        self.gemini_svc = get_gemini_service()
+                    response_text, gemini_ms = await self.gemini_svc.generate_response(
+                        prompt=clean_prompt,
+                        history=history_context,
+                        model_override=model_override,
+                    )
 
                 # Validate generation has not been superseded during Gemini call
                 if not session.is_current_generation(generation_id):
@@ -297,6 +328,7 @@ class AssistantCore:
         audio_bytes: bytes,
         audio_format: str = "wav",
         session_id: Optional[str] = None,
+        device_token: Optional[str] = None,
         trace_id: str = "local_trace",
     ) -> Dict[str, Any]:
         """Process raw microphone audio through STT -> Command Routing -> Gemini -> TTS with Generation ID validation."""
@@ -405,6 +437,7 @@ class AssistantCore:
             speak=True,
             source="voice",
             session_id=current_sid,
+            device_token=device_token,
             trace_id=trace_id,
         )
 

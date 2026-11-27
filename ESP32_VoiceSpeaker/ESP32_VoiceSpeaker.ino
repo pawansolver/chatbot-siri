@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <Preferences.h>
 #include <WebServer.h>
@@ -9,14 +10,14 @@
 
 // =============================================================================
 // AETHER AI SMART SPEAKER - PRODUCTION EMBEDDED CLIENT (ESP32 / ESP32-S3)
-// Connected to AWS Cloud Backend: http://15.135.138.107:8000
+// Configured via NVS Captive Portal (HTTPS + Per-Device Pairing Token)
 // =============================================================================
 
-// Default Fallback Credentials (NVS Flash memory me save hote hain)
-static const char* DEFAULT_SSID        = "Arvind";
-static const char* DEFAULT_PASSWORD    = "G7654321";
-static const char* DEFAULT_SERVER_BASE = "http://15.135.138.107:8000";
-static const char* DEFAULT_API_KEY     = "";  // Optional
+// Default Fallback Credentials (Configure actual values in NVS Captive Portal)
+static const char* DEFAULT_SSID        = "";
+static const char* DEFAULT_PASSWORD    = "";
+static const char* DEFAULT_SERVER_BASE = "";  // e.g. https://speaker.example.com
+static const char* DEFAULT_API_KEY     = "";  // Per-device paired token (fluai_dev_...)
 
 // =============================================================================
 // FIXED HARDWARE PINS (I2S Audio Pipeline)
@@ -294,18 +295,33 @@ void playWavStream(WiFiClient* stream, int totalBytes) {
   Serial.println("✅ AI finished speaking!");
 }
 
+void beginHttpClient(HTTPClient& http, WiFiClientSecure& secureClient, const String& url) {
+  if (url.startsWith("https://")) {
+    secureClient.setInsecure();
+    http.begin(secureClient, url);
+  } else {
+    http.begin(url);
+  }
+}
+
+void attachDeviceAuthHeaders(HTTPClient& http) {
+  if (cfgApiKey.length() > 0) {
+    http.addHeader("X-Device-Token", cfgApiKey);
+    http.addHeader("X-API-Key", cfgApiKey);
+  }
+}
+
 // Fallback: Download audio from URL if server responded with JSON
 void playAudioFromURL(String audioUrl) {
   Serial.print("📥 Downloading AI voice response: ");
   Serial.println(audioUrl);
 
   HTTPClient http;
-  http.begin(audioUrl);
+  WiFiClientSecure secureClient;
+  beginHttpClient(http, secureClient, audioUrl);
   http.setTimeout(30000);
   http.addHeader("Connection", "close");
-  if (cfgApiKey.length() > 0) {
-    http.addHeader("X-API-Key", cfgApiKey);
-  }
+  attachDeviceAuthHeaders(http);
   int httpCode = http.GET();
 
   if (httpCode == HTTP_CODE_OK) {
@@ -510,19 +526,25 @@ void setup() {
   setupConfigWebServer();
   Serial.println("🔄 Config UI ready at http://" + WiFi.localIP().toString());
 
-  // Ping AWS Cloud Backend Health
-  HTTPClient http;
-  String checkUrl = cfgServerBase + "/health/live";
-  http.begin(checkUrl);
-  http.setTimeout(10000);
-  http.addHeader("Connection", "close");
-  int code = http.GET();
-  if (code == 200) {
-    Serial.println("🧠 Connected to AWS AI Cloud Backend successfully!");
-    playBeep(523, 120); // High pitch startup chime
-    playBeep(659, 160);
+  // Ping Cloud Backend Health (HTTPS supported)
+  if (cfgServerBase.length() > 0) {
+    HTTPClient http;
+    WiFiClientSecure secureClient;
+    String checkUrl = cfgServerBase + "/health/live";
+    beginHttpClient(http, secureClient, checkUrl);
+    http.setTimeout(10000);
+    http.addHeader("Connection", "close");
+    int code = http.GET();
+    if (code == 200) {
+      Serial.println("🧠 Connected to AI Cloud Backend successfully!");
+      playBeep(523, 120); // High pitch startup chime
+      playBeep(659, 160);
+    } else {
+      Serial.printf("⚠️ Server health check status: %d (Check server base: %s)\n", code, cfgServerBase.c_str());
+    }
+    http.end();
   } else {
-    Serial.printf("⚠️ Server health check status: %d (Check server base: %s)\n", code, cfgServerBase.c_str());
+    Serial.println("⚠️ Server URL not configured. Open config portal to set HTTPS server & paired token.");
   }
   http.end();
 
@@ -655,17 +677,16 @@ void loop() {
       Serial.printf("📤 Sending %.1f KB audio WAV to AWS Cloud...\n", actualPayloadLen / 1024.0);
 
       HTTPClient http;
+      WiFiClientSecure secureClient;
       String uploadUrl = cfgServerBase + "/api/voice/process-audio";
-      http.begin(uploadUrl);
+      beginHttpClient(http, secureClient, uploadUrl);
       http.setTimeout(45000);
       const char* headerKeys[] = {"Content-Type", "X-AI-Response", "X-Prompt"};
       http.collectHeaders(headerKeys, 3);
       http.addHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
       http.addHeader("Accept", "audio/wav, application/json");
       http.addHeader("Connection", "close");
-      if (cfgApiKey.length() > 0) {
-        http.addHeader("X-API-Key", cfgApiKey);
-      }
+      attachDeviceAuthHeaders(http);
 
       int resCode = http.POST(payload, actualPayloadLen);
       free(payload);

@@ -97,6 +97,20 @@ class DeviceStateResponse(BaseModel):
     timestamp: float = Field(default_factory=time.time)
 
 
+class DevicePairRequest(BaseModel):
+    device_id: str = Field(..., min_length=3, max_length=120, description="Unique hardware ID (e.g. esp32 MAC)")
+    user_id: str = Field(..., min_length=1, max_length=120, description="Canonical Open WebUI user_id")
+    device_name: str = Field(default="ESP32 Speaker", max_length=120)
+
+
+class DevicePairResponse(BaseModel):
+    status: str
+    device_id: str
+    user_id: str
+    device_name: str
+    device_token: str
+
+
 class WebSocketEvent(BaseModel):
     type: str  # "state_change" | "device_state_change" | "stream_chunk" | "final_response" | "command_executed" | "cancel_generation" | "error"
     state: Optional[str] = None
